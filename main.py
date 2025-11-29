@@ -21,6 +21,13 @@ from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
 from datetime import datetime, timezone
 
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s"
+)
+logger = logging.getLogger(__name__)
+
 # ========== CONFIGURATION ==========
 API_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
 BEARER_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjQ0ODgyOTQsInN1YiI6IjVjZWFjZDQ0LWNjZjYtMTFmMC1iYzllLTQyMDI0MTE2YWU5ZSJ9.xNWFnk_whorYiM1MgDleFWS6PunWAkFybbg3NgrtEXc"
@@ -707,11 +714,7 @@ class GeminiGenAPI:
             except asyncio.TimeoutError:
                 raise Exception("Download timeout after 5 minutes")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(message)s"
-)
-logger = logging.getLogger(__name__)
+
 
 # ParseMode changed to HTML for better safety
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
