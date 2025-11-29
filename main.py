@@ -6,8 +6,6 @@ import re
 import io
 import secrets
 import hashlib
-import signal
-import sys
 import os
 from typing import Dict, List, Optional, Any
 from aiogram import Bot, Dispatcher, types, F, Router, BaseMiddleware
@@ -31,18 +29,18 @@ logger = logging.getLogger(__name__)
 # ===============================================
 
 # ========== CONFIGURATION (ENVIRONMENT VARIABLES) ==========
-API_TOKEN = os.getenv("API_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
-BEARER_TOKEN = os.getenv("BEARER_TOKEN", "YOUR_BEARER_TOKEN")
+API_TOKEN = os.getenv("API_TOKEN")
+BEARER_TOKEN = os.getenv("BEARER_TOKEN")
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017/")
-OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 FORCE_JOIN_CHANNEL = os.getenv("FORCE_JOIN_CHANNEL", "@yourchannel")
-LOG_GROUP_ID = int(os.getenv("LOG_GROUP_ID", "-1001234567890")) if os.getenv("LOG_GROUP_ID") else None
+LOG_GROUP_ID = int(os.getenv("LOG_GROUP_ID")) if os.getenv("LOG_GROUP_ID") else None
 
-COOKIE_FILE_CONTENT = """# Netscape HTTP Cookie File
+COOKIE_FILE_CONTENT = os.getenv("COOKIE_FILE_CONTENT", """# Netscape HTTP Cookie File
 geminigen.ai	FALSE	/	FALSE	1779779317	ext_name	ojplmecpdpgccookcobabopnaifgidhf
 geminigen.ai	FALSE	/	FALSE	1779741622	i18n_redirected	en
 .geminigen.ai	TRUE	/	TRUE	1779741772	cf_clearance	6azc623mvyLqCfSRQZvLt3JCLs_lqXVIlYCUOAE3770-1764189771-1.2.1.1-dTH3sePAT0USkZbzKNjwE1dzzgJ5V6p7iuW6TMuQ_6sYmZsxVpJREHoDuolv9gfwvOKlURyCynaKbUOLS0aHsZj1pe72wdtYZUAOqkQ1sIFrBREfEoJh.s763UkmcFZdXlNdWOLaTmeo4TSFgyKkCVmxPUfWtNYlrxXsYG18B.HmBYgT.9EkTVduLdVeD7QqCClAlvuYU7JXp7TYBih8XtAEsMv78zBirZLxrEkyvvI
-"""
+""")
 # ===========================================================
 
 NSFW_WORDS = {
@@ -77,14 +75,13 @@ def validate_config():
     
     for name, value in required.items():
         if not value or value == f"YOUR_{name}":
+            logger.error(f"❌ Configuration error: {name} is not set!")
             raise ValueError(f"Configuration error: {name} must be set!")
-    
-    if OWNER_ID == 123456789:
-        logger.warning("Using default OWNER_ID, consider changing it!")
 
 class Database:
     def __init__(self, uri: str):
         try:
+            logger.info(f"🔌 Connecting to MongoDB...")
             self.client = MongoClient(uri, serverSelectionTimeoutMS=5000)
             self.client.server_info()
             self.db = self.client.gemini_bot
@@ -180,7 +177,6 @@ class Database:
         # Try daily credits first
         if credits.get(daily_key, 0) > 0:
             self.update_credits(user_id, daily_key, -1)
-            # FIXED: Use direct DB update for generation count
             self.users.update_one(
                 {"user_id": user_id},
                 {"$inc": {f"generation_count.{media_type}s": 1}}
@@ -190,7 +186,6 @@ class Database:
         # Then try one-time credits
         if credits.get(one_time_key, 0) > 0:
             self.update_credits(user_id, one_time_key, -1)
-            # FIXED: Use direct DB update for generation count
             self.users.update_one(
                 {"user_id": user_id},
                 {"$inc": {f"generation_count.{media_type}s": 1}}
@@ -200,7 +195,6 @@ class Database:
         return False
     
     def ban_user(self, user_id: int, reason: str = "nsfw violation", banned_by: int = None):
-        """Ban a user with a specific reason"""
         self.users.update_one(
             {"user_id": user_id},
             {
@@ -214,7 +208,6 @@ class Database:
         )
     
     def unban_user(self, user_id: int, unbanned_by: int = None):
-        """Unban a user and reset warnings"""
         self.users.update_one(
             {"user_id": user_id},
             {
@@ -233,7 +226,6 @@ class Database:
         )
     
     def add_whitelist(self, user_id: int, media_type: str, value: int):
-        """Add whitelist credits (increments existing)"""
         if not self.get_user(user_id):
             self.create_user(user_id)
         
@@ -292,11 +284,8 @@ class Database:
         if not ref:
             return False
         
-        # Give credits to referrer
         self.update_credits(ref["referred_by"], "image_one_time", 15)
         self.update_credits(ref["referred_by"], "video_one_time", 10)
-        
-        # Give credits to referee
         self.update_credits(user_id, "image_one_time", 10)
         self.update_credits(user_id, "video_one_time", 5)
         
@@ -307,7 +296,6 @@ class Database:
         return True
     
     def get_all_users(self) -> List[int]:
-        """Get all user IDs for broadcasting"""
         try:
             return [user["user_id"] for user in self.users.find({}, {"user_id": 1})]
         except Exception as e:
@@ -352,7 +340,6 @@ class UserManagerMiddleware(BaseMiddleware):
             if not user:
                 user = db.create_user(user_id, username)
             
-            # Check if user is banned
             if user.get("blocked"):
                 reason = user.get("ban_reason", "Violation of bot rules")
                 if isinstance(event, types.Message):
@@ -378,33 +365,26 @@ class ForceJoinMiddleware(BaseMiddleware):
         self.channel_username = channel_username
     
     async def __call__(self, handler, event, data):
-        # Check both messages and callback queries
         if isinstance(event, (types.Message, types.CallbackQuery)):
-            # Allow help command
             if isinstance(event, types.Message) and event.text and event.text.startswith("/help"):
                 return await handler(event, data)
             
-            # Allow start with referral (handled separately)
             if isinstance(event, types.Message) and event.text and event.text.startswith("/start"):
                 return await handler(event, data)
             
-            # Check channel membership
             user_id = event.from_user.id
             try:
-                # FIXED: Removed extra space in URL
                 member = await bot.get_chat_member(self.channel_username, user_id)
                 if member.status in ["member", "administrator", "creator"]:
                     return await handler(event, data)
             except Exception as e:
                 logger.warning(f"Failed to check membership for {user_id}: {e}")
-                # FIXED: Continue if check fails (don't block user)
                 return await handler(event, data)
             
-            # User is not a member
             keyboard = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(
                     text="Join Channel", 
-                    url=f"https://t.me/{self.channel_username.strip('@')}"  # FIXED: Removed space
+                    url=f"https://t.me/{self.channel_username.strip('@')}"
                 )
             ]])
             
@@ -421,17 +401,14 @@ class ForceJoinMiddleware(BaseMiddleware):
 class NSFWFilterMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         if isinstance(event, types.Message) and event.text:
-            # Use regex for better word boundary detection
             if NSFW_PATTERN.search(event.text):
                 user_id = event.from_user.id
                 
-                # Update warnings in DB
                 db.users.update_one(
                     {"user_id": user_id},
                     {"$inc": {"nsfw_warnings": 1}}
                 )
                 
-                # Fetch updated user data
                 user = db.get_user(user_id)
                 if not user:
                     return await handler(event, data)
@@ -439,13 +416,10 @@ class NSFWFilterMiddleware(BaseMiddleware):
                 warnings = user.get("nsfw_warnings", 0)
                 
                 if warnings >= 3:
-                    # Use the new ban_user method for consistency
                     db.ban_user(user_id, reason="nsfw violation")
-                    # FIXED: Use reply() for messages
                     await event.reply("❌ You have been permanently blocked for NSFW content!")
                     return
                 else:
-                    # FIXED: Use reply() for messages
                     await event.reply(
                         f"⚠️ NSFW content detected! Warning {warnings}/3\n"
                         "Do not use NSFW prompt or you will be permanently blocked!"
@@ -488,8 +462,6 @@ class GeminiGenAPI:
             if image_bytes:
                 form.add_field('files', image_bytes, filename="reference.jpg", content_type='image/jpeg')
             
-            logger.info(f"🚀 POST {endpoint} with aspect_ratio={aspect_ratio}")
-            
             async with session.post(endpoint, data=form) as resp:
                 if resp.status not in (200, 202):
                     text = await resp.text()
@@ -498,13 +470,10 @@ class GeminiGenAPI:
                     raise Exception(f"Generation failed: HTTP {resp.status}\nResponse: {text[:500]}")
                 
                 result = await resp.json()
-                logger.info(f"✅ Generation response: {json.dumps(result, indent=2)}")
-                
                 job_id = result.get("uuid") or result.get("id")
                 if not job_id:
                     raise Exception(f"No job_id found: {result}")
                 
-                logger.info(f"🆔 Job UUID: {job_id}")
                 return job_id
     
     async def generate_video(self, prompt: str) -> str:
@@ -519,8 +488,6 @@ class GeminiGenAPI:
             form.add_field('aspect_ratio', '16:9')
             form.add_field('enhance_prompt', 'true')
             
-            logger.info(f"🚀 POST {endpoint}")
-            
             async with session.post(endpoint, data=form) as resp:
                 if resp.status not in (200, 202):
                     text = await resp.text()
@@ -529,13 +496,10 @@ class GeminiGenAPI:
                     raise Exception(f"Generation failed: HTTP {resp.status}\nResponse: {text[:500]}")
                 
                 result = await resp.json()
-                logger.info(f"✅ Generation response: {json.dumps(result, indent=2)}")
-                
                 job_id = result.get("uuid") or result.get("id")
                 if not job_id:
                     raise Exception(f"No job_id found: {result}")
                 
-                logger.info(f"🆔 Job UUID: {job_id}")
                 return job_id
     
     async def poll_for_image(self, job_id: str, timeout: int = 300) -> str:
@@ -552,13 +516,10 @@ class GeminiGenAPI:
                 if elapsed > timeout:
                     raise TimeoutError(f"Timeout after {timeout}s")
                 
-                logger.info(f"⏳ Polling {endpoint} ({elapsed:.1f}s) - Attempt {retry_count + 1}/{max_retries}")
-                
                 try:
                     async with session.get(endpoint) as resp:
                         if resp.status != 200:
                             text = await resp.text()
-                            logger.warning(f"Poll failed: HTTP {resp.status} - {text[:200]}")
                             retry_count += 1
                             if retry_count >= max_retries:
                                 raise Exception(f"Max retries ({max_retries}) reached: HTTP {resp.status}")
@@ -575,7 +536,6 @@ class GeminiGenAPI:
                                     for field in possible_fields:
                                         if field in img_item and img_item[field]:
                                             image_url = img_item[field]
-                                            logger.info(f"✅ Found image URL in generated_image[0]['{field}']: {image_url[:80]}...")
                                             break
                                     if image_url:
                                         break
@@ -585,7 +545,6 @@ class GeminiGenAPI:
                             for field in top_fields:
                                 if field in result and result[field]:
                                     image_url = result[field]
-                                    logger.info(f"✅ Found image URL in top-level '{field}': {image_url[:80]}...")
                                     break
                         
                         if not image_url:
@@ -593,7 +552,6 @@ class GeminiGenAPI:
                             img_matches = re.findall(r'https?://[^\s"]+\.(?:png|jpg|jpeg|webp)(?:\?[^\s"]*)?', result_str, re.IGNORECASE)
                             if img_matches:
                                 image_url = img_matches[0]
-                                logger.info(f"✅ Extracted image URL from JSON scan: {image_url[:80]}...")
                         
                         if image_url:
                             return image_url
@@ -606,25 +564,12 @@ class GeminiGenAPI:
                         if status in [0, "failed", "error"]:
                             raise Exception(f"Generation failed with status: {status}, error: {error_message}")
                         
-                        if error_message and "high traffic" in error_message.lower():
-                            logger.warning(f"⚠️ High traffic: {error_message}")
-                            retry_count += 1
-                            if retry_count >= max_retries:
-                                raise Exception(f"Max retries ({max_retries}) reached due to high traffic")
-                            logger.info(f"⏳ Retrying in 10s... Queue: {queue}, Progress: {progress}%")
-                            await asyncio.sleep(10)
-                            continue
-                        
                         if status in [1, "processing", "queued"] or progress < 100:
-                            logger.info(f"⏳ Processing... Progress: {progress}%, Queue: {queue}")
                             await asyncio.sleep(8)
                             continue
                         
-                        logger.warning(f"Unknown state: status={status}, progress={progress}, error={error_message}")
                         await asyncio.sleep(5)
                 
-                except asyncio.TimeoutError:
-                    raise
                 except Exception as e:
                     logger.exception(f"Polling error: {e}")
                     retry_count += 1
@@ -646,13 +591,10 @@ class GeminiGenAPI:
                 if elapsed > timeout:
                     raise TimeoutError(f"Timeout after {timeout}s")
                 
-                logger.info(f"⏳ Polling video {endpoint} ({elapsed:.1f}s) - Attempt {retry_count + 1}/{max_retries}")
-                
                 try:
                     async with session.get(endpoint) as resp:
                         if resp.status != 200:
                             text = await resp.text()
-                            logger.warning(f"Poll failed: HTTP {resp.status}")
                             retry_count += 1
                             if retry_count >= max_retries:
                                 raise Exception(f"Max retries ({max_retries}) reached")
@@ -698,11 +640,9 @@ class GeminiGenAPI:
                             raise Exception(f"Generation failed: {error_message}")
                         
                         if status in [1, "processing", "queued"] or progress < 100:
-                            logger.info(f"⏳ Video processing... Progress: {progress}%, Queue: {queue}")
                             await asyncio.sleep(5)
                             continue
                         
-                        logger.warning(f"Unknown video state: status={status}, progress={progress}")
                         await asyncio.sleep(3)
                 
                 except Exception as e:
@@ -715,8 +655,6 @@ class GeminiGenAPI:
     async def download_media(self, url: str, max_size: int = 50 * 1024 * 1024) -> bytes:
         """Download media with size limit (default 50MB)"""
         async with aiohttp.ClientSession() as session:
-            logger.info(f"📥 Downloading from {url[:80]}...")
-            
             try:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=300)) as resp:
                     if resp.status != 200:
@@ -726,20 +664,15 @@ class GeminiGenAPI:
                     if size > max_size:
                         raise Exception(f"File too large: {size / 1024 / 1024:.1f}MB > {max_size / 1024 / 1024:.1f}MB limit")
                     
-                    logger.info(f"Download size: {size / 1024:.2f} KB")
-                    
                     return await resp.read()
             except asyncio.TimeoutError:
                 raise Exception("Download timeout after 5 minutes")
 
-# FIXED: Initialize bot with proper properties
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# FIXED: Reordered middleware for proper execution
-# UserManager first to ensure user exists, then ForceJoin, then NSFW filter
 dp.message.middleware(UserManagerMiddleware())
 dp.callback_query.middleware(UserManagerMiddleware())
 dp.message.middleware(ForceJoinMiddleware(FORCE_JOIN_CHANNEL))
@@ -779,14 +712,639 @@ async def cmd_start(msg: types.Message, user: Dict):
         parse_mode="HTML"
     )
 
-# ... (rest of your command handlers remain the same) ...
+@router.message(Command("help"))
+async def cmd_help(msg: types.Message):
+    """Show help information"""
+    await msg.reply(
+        "🆘 <b>Help</b>\n\n"
+        "This bot generates images and videos using AI.\n\n"
+        "<b>Commands:</b>\n"
+        "/start - Start the bot\n"
+        "/help - Show this help\n"
+        "/banana - Generate images\n"
+        "/video - Generate videos\n"
+        "/refer - Get referral link\n"
+        "/predeem - Redeem coupon\n"
+        "/vredeem - Redeem video coupon\n\n"
+        "⚠️ NSFW content is strictly prohibited!",
+        parse_mode="HTML"
+    )
+
+@router.message(Command("banana"))
+async def cmd_banana(msg: types.Message):
+    """Show banana generation menu"""
+    await msg.reply(
+        "🍌 <b>Nano Banana Menu</b>\n\n"
+        "Choose what you want to do:",
+        reply_markup=banana_menu_keyboard(),
+        parse_mode="HTML"
+    )
+
+@router.message(Command("video"))
+async def cmd_video(msg: types.Message, state: FSMContext, user: Dict):
+    """Start video generation process"""
+    if not db.use_credit(msg.from_user.id, "video"):
+        await msg.answer("❌ No video credits left. Use /refer or redeem coupons to earn more!")
+        return
+    
+    await msg.answer("📹 <b>Send me a prompt for video generation:</b>", parse_mode="HTML")
+    await state.set_state(VideoStates.waiting_for_video_prompt)
+
+@router.message(Command("refer"))
+async def cmd_refer(msg: types.Message, user: Dict):
+    """Handle referral system"""
+    if len(msg.text.split()) > 1:
+        code = msg.text.split()[1]
+        try:
+            if db.use_referral(msg.from_user.id, code):
+                await msg.answer("🎉 Referral successful! You received 10 image and 5 video credits!")
+            else:
+                await msg.answer("❌ Invalid referral code or already used!")
+        except Exception as e:
+            logger.error(f"Referral usage error: {e}")
+            await msg.answer("❌ Error processing referral. Please try again.")
+    else:
+        try:
+            existing = db.referrals.find_one({"referred_by": msg.from_user.id})
+            if existing:
+                code = existing["code"]
+            else:
+                code = db.create_referral(msg.from_user.id)
+            
+            bot_info = await bot.get_me()
+            bot_username = bot_info.username
+            link = f"https://t.me/{bot_username}?start=ref_{code}"
+            await msg.answer(
+                f"🔗 <b>Your Referral Link:</b>\n<code>{link}</code>\n\n"
+                "Share this with friends! You get 15 image + 10 video credits when they join.\n"
+                "They get 10 image + 5 video credits.",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Referral generation error: {e}")
+            await msg.answer("❌ Error generating referral link. Please try again.")
+
+@router.message(Command("predeem"))
+async def cmd_predeem(msg: types.Message, user: Dict):
+    """Redeem image coupon"""
+    if len(msg.text.split()) < 2:
+        await msg.answer("Usage: /predeem <coupon_code>")
+        return
+    
+    code = msg.text.split()[1]
+    try:
+        if db.redeem_coupon(msg.from_user.id, code):
+            await msg.answer("🎉 Coupon redeemed successfully! Image credits added.")
+        else:
+            await msg.answer("❌ Invalid or already used coupon!")
+    except Exception as e:
+        logger.error(f"Coupon redemption error: {e}")
+        await msg.answer("❌ Error redeeming coupon. Please try again.")
+
+@router.message(Command("vredeem"))
+async def cmd_vredeem(msg: types.Message, user: Dict):
+    """Redeem video coupon"""
+    if len(msg.text.split()) < 2:
+        await msg.answer("Usage: /vredeem <coupon_code>")
+        return
+    
+    code = msg.text.split()[1]
+    try:
+        if db.redeem_coupon(msg.from_user.id, code):
+            await msg.answer("🎉 Coupon redeemed successfully! Video credits added.")
+        else:
+            await msg.answer("❌ Invalid or already used coupon!")
+    except Exception as e:
+        logger.error(f"Video coupon redemption error: {e}")
+        await msg.answer("❌ Error redeeming coupon. Please try again.")
+
+def is_owner(user_id: int) -> bool:
+    return user_id == OWNER_ID
+
+def is_admin(user_id: int) -> bool:
+    user = db.get_user(user_id)
+    return user and (user.get("is_admin") or is_owner(user_id))
+
+@router.message(Command("stats"))
+async def cmd_stats(msg: types.Message, user: Dict):
+    """Show bot statistics"""
+    if not is_admin(msg.from_user.id):
+        await msg.answer("❌ You don't have permission!")
+        return
+    
+    try:
+        total_users = db.users.count_documents({})
+        total_groups = db.groups.count_documents({})
+        total_images_result = db.users.aggregate([
+            {"$group": {"_id": None, "total": {"$sum": "$generation_count.images"}}}
+        ])
+        total_images = next(total_images_result, {}).get("total", 0)
+        
+        total_videos_result = db.users.aggregate([
+            {"$group": {"_id": None, "total": {"$sum": "$generation_count.videos"}}}
+        ])
+        total_videos = next(total_videos_result, {}).get("total", 0)
+        
+        await msg.answer(
+            f"📊 <b>Bot Statistics</b>\n\n"
+            f"👥 Total Users: {total_users}\n"
+            f"👥 Total Groups: {total_groups}\n"
+            f"🖼️ Total Images: {total_images}\n"
+            f"📹 Total Videos: {total_videos}",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Stats command error: {e}")
+        await msg.answer("❌ Error retrieving statistics. Please try again.")
+
+@router.message(Command("ban"))
+async def cmd_ban(msg: types.Message, user: Dict):
+    """Ban a user (admin/owner only)"""
+    if not is_admin(msg.from_user.id):
+        await msg.answer("❌ Admin only!")
+        return
+    
+    try:
+        parts = msg.text.split(maxsplit=2)
+        if len(parts) < 2:
+            await msg.answer("Usage: /ban <user_id> [reason]")
+            return
+        
+        target_id = int(parts[1])
+        reason = parts[2] if len(parts) > 2 else "nsfw violation"
+        
+        if target_id == OWNER_ID:
+            await msg.answer("❌ Cannot ban the owner!")
+            return
+        
+        if is_admin(target_id) and not is_owner(msg.from_user.id):
+            await msg.answer("❌ You cannot ban other admins!")
+            return
+        
+        if target_id == msg.from_user.id:
+            await msg.answer("❌ You cannot ban yourself!")
+            return
+        
+        db.ban_user(target_id, reason, banned_by=msg.from_user.id)
+        await msg.answer(f"✅ User {target_id} has been banned.\nReason: {reason}")
+        
+        try:
+            await bot.send_message(
+                target_id,
+                f"❌ You have been banned from using this bot.\n\n"
+                f"Reason: {reason}\n\n"
+                f"If you believe this is a mistake, contact the bot owner."
+            )
+        except Exception as e:
+            logger.warning(f"Could not notify banned user {target_id}: {e}")
+            
+    except ValueError:
+        await msg.answer("❌ Invalid user ID!")
+    except Exception as e:
+        logger.error(f"Ban error: {e}")
+        await msg.answer("❌ Error banning user. Please try again.")
+
+@router.message(Command("unban"))
+async def cmd_unban(msg: types.Message, user: Dict):
+    """Unban a user (admin/owner only)"""
+    if not is_admin(msg.from_user.id):
+        await msg.answer("❌ Admin only!")
+        return
+    
+    try:
+        parts = msg.text.split(maxsplit=2)
+        if len(parts) < 2:
+            await msg.answer("Usage: /unban <user_id> [reason]")
+            return
+        
+        target_id = int(parts[1])
+        unban_reason = parts[2] if len(parts) > 2 else "Appeal accepted"
+        
+        target_user = db.get_user(target_id)
+        if not target_user or not target_user.get("blocked"):
+            await msg.answer(f"❌ User {target_id} is not banned!")
+            return
+        
+        db.unban_user(target_id, unbanned_by=msg.from_user.id)
+        await msg.answer(f"✅ User {target_id} has been unbanned.\nReason: {unban_reason}")
+        
+        try:
+            await bot.send_message(
+                target_id,
+                f"✅ You have been unbanned from the bot!\n\n"
+                f"Reason: {unban_reason}\n\n"
+                f"Happy generating! 🎉"
+            )
+        except Exception as e:
+            logger.warning(f"Could not notify unbanned user {target_id}: {e}")
+            
+    except ValueError:
+        await msg.answer("❌ Invalid user ID!")
+    except Exception as e:
+        logger.error(f"Unban error: {e}")
+        await msg.answer("❌ Error unbanning user. Please try again.")
+
+@router.message(Command("pic_whitelist"))
+async def cmd_pic_whitelist(msg: types.Message, user: Dict):
+    """Whitelist user for image credits (owner only)"""
+    if not is_owner(msg.from_user.id):
+        await msg.answer("❌ Only owner can use this!")
+        return
+    
+    try:
+        parts = msg.text.split()
+        if len(parts) != 3:
+            raise ValueError("Invalid format - expected 2 arguments")
+        
+        _, value, target_id = parts
+        db.add_whitelist(int(target_id), "image_daily", int(value))
+        await msg.answer(f"✅ Whitelisted {target_id} for {value} image credits/day")
+    except ValueError as e:
+        await msg.answer(f"❌ Usage: /pic_whitelist <value> <user_id>\nError: {e}")
+    except Exception as e:
+        logger.error(f"Pic whitelist error: {e}")
+        await msg.answer("❌ Error updating whitelist. Please try again.")
+
+@router.message(Command("vdo_whitelist"))
+async def cmd_vdo_whitelist(msg: types.Message, user: Dict):
+    """Whitelist user for video credits (owner only)"""
+    if not is_owner(msg.from_user.id):
+        await msg.answer("❌ Only owner can use this!")
+        return
+    
+    try:
+        parts = msg.text.split()
+        if len(parts) != 3:
+            raise ValueError("Invalid format - expected 2 arguments")
+        
+        _, value, target_id = parts
+        db.add_whitelist(int(target_id), "video_daily", int(value))
+        await msg.answer(f"✅ Whitelisted {target_id} for {value} video credits/day")
+    except ValueError as e:
+        await msg.answer(f"❌ Usage: /vdo_whitelist <value> <user_id>\nError: {e}")
+    except Exception as e:
+        logger.error(f"Video whitelist error: {e}")
+        await msg.answer("❌ Error updating whitelist. Please try again.")
+
+@router.message(Command("pic_coupon"))
+async def cmd_pic_coupon(msg: types.Message, user: Dict):
+    """Create image coupon (admin only)"""
+    if not is_admin(msg.from_user.id):
+        await msg.answer("❌ Admin only!")
+        return
+    
+    try:
+        _, value, name = msg.text.split(maxsplit=2)
+        db.create_coupon(name, "pic", int(value), msg.from_user.id)
+        await msg.answer(f"🎟️ Coupon created: <code>{name}</code>\nValue: {value} image credits", parse_mode="HTML")
+    except ValueError:
+        await msg.answer("❌ Usage: /pic_coupon <value> <name>")
+    except Exception as e:
+        logger.error(f"Pic coupon creation error: {e}")
+        await msg.answer("❌ Error creating coupon. Please try again.")
+
+@router.message(Command("vdo_coupon"))
+async def cmd_vdo_coupon(msg: types.Message, user: Dict):
+    """Create video coupon (admin only)"""
+    if not is_admin(msg.from_user.id):
+        await msg.answer("❌ Admin only!")
+        return
+    
+    try:
+        _, value, name = msg.text.split(maxsplit=2)
+        db.create_coupon(name, "vdo", int(value), msg.from_user.id)
+        await msg.answer(f"🎟️ Coupon created: <code>{name}</code>\nValue: {value} video credits", parse_mode="HTML")
+    except ValueError:
+        await msg.answer("❌ Usage: /vdo_coupon <value> <name>")
+    except Exception as e:
+        logger.error(f"Video coupon creation error: {e}")
+        await msg.answer("❌ Error creating coupon. Please try again.")
+
+@router.message(Command("broadcast"))
+async def cmd_broadcast(msg: types.Message):
+    """Broadcast message to all users (owner only)"""
+    if not is_owner(msg.from_user.id):
+        await msg.answer("❌ Owner only!")
+        return
+    
+    text = msg.text[11:].strip()
+    if not text:
+        await msg.answer("Usage: /broadcast <message>")
+        return
+    
+    if len(text) > 4000:
+        await msg.answer("❌ Message too long! Maximum 4000 characters.")
+        return
+    
+    confirm_id = hashlib.sha256(f"{msg.message_id}:{text}".encode()).hexdigest()[:16]
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Confirm Broadcast", callback_data=f"broadcast_confirm_{confirm_id}")],
+        [InlineKeyboardButton(text="❌ Cancel", callback_data="broadcast_cancel")]
+    ])
+    await msg.answer(f"Broadcast to {db.users.count_documents({})} users?\n\n{text}", reply_markup=keyboard)
+
+@router.callback_query(F.data.startswith("broadcast_confirm_"))
+async def confirm_broadcast(cb: CallbackQuery):
+    """Confirm and execute broadcast"""
+    if not is_owner(cb.from_user.id):
+        await cb.answer("❌ Not allowed!", show_alert=True)
+        return
+    
+    if not cb.message:
+        await cb.answer("❌ Message not found!", show_alert=True)
+        return
+    
+    await cb.answer("📢 Broadcasting...", show_alert=False)
+    await cb.message.edit_text("📢 Broadcasting in progress...\n\n⏳ Sending messages...")
+    
+    success = 0
+    failed = 0
+    
+    user_ids = db.get_all_users()
+    total = len(user_ids)
+    
+    for idx, user_id in enumerate(user_ids, 1):
+        try:
+            message_parts = cb.message.html_text.split('\n', 2)
+            if len(message_parts) < 3:
+                await cb.message.edit_text("❌ Invalid broadcast message format!")
+                return
+            
+            message_text = message_parts[2]
+            await bot.send_message(user_id, message_text, parse_mode="HTML")
+            success += 1
+            
+            if idx % 50 == 0:
+                await cb.message.edit_text(
+                    f"📢 Broadcasting in progress...\n\n"
+                    f"⏳ Progress: {idx}/{total}\n"
+                    f"✅ Sent: {success}\n"
+                    f"❌ Failed: {failed}"
+                )
+            
+            await asyncio.sleep(0.05)
+            
+        except Exception as e:
+            failed += 1
+            logger.error(f"Broadcast failed to {user_id}: {e}")
+    
+    await cb.message.edit_text(
+        f"✅ Broadcast complete!\n\n"
+        f"📊 Total: {total}\n"
+        f"✅ Sent: {success}\n"
+        f"❌ Failed: {failed}"
+    )
+
+@router.callback_query(F.data == "broadcast_cancel")
+async def cancel_broadcast(cb: CallbackQuery):
+    """Cancel broadcast"""
+    if not is_owner(cb.from_user.id):
+        await cb.answer("❌ Not allowed!", show_alert=True)
+        return
+    
+    if not cb.message:
+        await cb.answer("❌ Message not found!", show_alert=True)
+        return
+    
+    await cb.answer("Cancelled", show_alert=False)
+    await cb.message.edit_text("❌ Broadcast cancelled")
+
+@router.callback_query(F.data == "banana_new")
+async def process_new_image(cb: CallbackQuery, state: FSMContext, user: Dict):
+    """Start new image generation"""
+    if not db.use_credit(cb.from_user.id, "image"):
+        await cb.answer("❌ No image credits left!", show_alert=True)
+        return
+    
+    await cb.answer()
+    await cb.message.edit_text("🎨 <b>Send me a prompt for new image generation:</b>", parse_mode="HTML")
+    await state.set_state(BananaStates.waiting_for_prompt)
+
+@router.callback_query(F.data == "banana_edit")
+async def process_edit_image(cb: CallbackQuery, state: FSMContext, user: Dict):
+    """Start image editing process"""
+    if not db.use_credit(cb.from_user.id, "image"):
+        await cb.answer("❌ No image credits left!", show_alert=True)
+        return
+    
+    await cb.answer()
+    await cb.message.edit_text(
+        "🖼️ <b>Send me the image you want to edit:</b>\n\n"
+        "<i>Upload as a photo (not as file)</i>",
+        parse_mode="HTML"
+    )
+    await state.set_state(BananaStates.waiting_for_photo)
+
+def detect_aspect_ratio(width: int, height: int) -> str:
+    """Detect aspect ratio from dimensions"""
+    if width > height:
+        return "16:9"
+    elif height > width:
+        return "9:16"
+    else:
+        return "1:1"
+
+def add_caption_footer(original_caption: str = "") -> str:
+    """Add footer to media captions"""
+    footer = (
+        "Generated by @nano_banana_veobot\n"
+        "Your image was successfully removed from our database !! 100% Private"
+    )
+    if original_caption:
+        return f"{original_caption}\n\n{footer}"
+    return footer
+
+@router.message(BananaStates.waiting_for_photo, F.photo)
+async def handle_received_photo(msg: types.Message, state: FSMContext, user: Dict):
+    """Handle photo upload for editing"""
+    photo = msg.photo[-1]
+    
+    if photo.file_size and photo.file_size > 10 * 1024 * 1024:
+        await msg.reply("❌ Image too large! Please send a photo under 10MB.")
+        return
+    
+    aspect_ratio = detect_aspect_ratio(photo.width, photo.height)
+    
+    await state.update_data(
+        photo_file_id=photo.file_id,
+        aspect_ratio=aspect_ratio
+    )
+    
+    await msg.reply(
+        "✅ <b>Image received!</b>\n\n"
+        f"📐 <b>Detected aspect ratio:</b> <code>{aspect_ratio}</code>\n\n"
+        "Now send me the edit prompt:",
+        parse_mode="HTML"
+    )
+    await state.set_state(BananaStates.waiting_for_edit_prompt)
+
+@router.message(BananaStates.waiting_for_photo)
+async def handle_no_photo(msg: types.Message):
+    """Handle non-photo upload in photo state"""
+    await msg.reply("❌ Please upload a photo (not a file). Try again:")
+
+@router.message(BananaStates.waiting_for_edit_prompt, F.text)
+async def handle_edit_prompt(msg: types.Message, state: FSMContext, user: Dict):
+    """Handle edit prompt after photo upload"""
+    prompt = msg.text.strip()
+    if len(prompt) < 3:
+        await msg.reply("❌ Prompt too short. Minimum 3 characters required. Try again:")
+        return
+    
+    user_data = await state.get_data()
+    photo_file_id = user_data.get("photo_file_id")
+    aspect_ratio = user_data.get("aspect_ratio", "16:9")
+    
+    if not photo_file_id:
+        await msg.reply("❌ Error: No image found. Start over with /banana")
+        await state.clear()
+        return
+    
+    status_msg = await msg.reply("📥 <b>Downloading your image...</b>", parse_mode="HTML")
+    try:
+        photo_file = await bot.get_file(photo_file_id)
+        photo_bytes = await bot.download_file(photo_file.file_path)
+        await status_msg.edit_text("🎨 <b>Generating edited image...</b> (~10-30s)", parse_mode="HTML")
+        
+        job_id = await api.generate_image(prompt, image_bytes=photo_bytes.getvalue(), aspect_ratio=aspect_ratio)
+        
+        await status_msg.edit_text("⏳ <b>Processing...</b>", parse_mode="HTML")
+        image_url = await api.poll_for_image(job_id, timeout=300)
+        
+        await status_msg.edit_text("⬇️ <b>Downloading final image...</b>", parse_mode="HTML")
+        image_bytes = await api.download_media(image_url)
+        
+        image_file = BufferedInputFile(image_bytes, filename=f"{job_id}.png")
+        response_msg = await msg.answer_document(
+            document=image_file,
+            caption=add_caption_footer(
+                f"✨ <b>Edited Image Ready!</b>\n\n"
+                f"📝 <b>Prompt:</b> <code>{prompt}</code>\n"
+                f"📐 <b>Ratio:</b> <code>{aspect_ratio}</code>\n"
+                f"🔖 <b>Job:</b> <code>{job_id[:8]}...</code>"
+            ),
+            parse_mode="HTML"
+        )
+        
+        await status_msg.delete()
+        
+        if LOG_GROUP_ID:
+            await bot.forward_message(LOG_GROUP_ID, msg.chat.id, response_msg.message_id)
+        
+    except Exception as e:
+        logger.exception(f"Failed for edit prompt: {prompt}")
+        await status_msg.edit_text(f"❌ <b>Error:</b>\n<code>{str(e)[:400]}</code>", parse_mode="HTML")
+        if LOG_GROUP_ID:
+            await bot.send_message(LOG_GROUP_ID, f"❌ Error for user {msg.from_user.id}:\n{str(e)[:400]}")
+    
+    await state.clear()
+
+@router.message(BananaStates.waiting_for_edit_prompt)
+async def handle_invalid_edit_prompt(msg: types.Message):
+    """Handle non-text input in edit prompt state"""
+    await msg.reply("❌ Please send a text prompt. Try again:")
+
+@router.message(BananaStates.waiting_for_prompt, F.text)
+async def handle_new_image_prompt(msg: types.Message, state: FSMContext, user: Dict):
+    """Handle new image generation prompt"""
+    prompt = msg.text.strip()
+    if len(prompt) < 3:
+        await msg.reply("❌ Prompt too short. Minimum 3 characters required. Try again:")
+        return
+    
+    status_msg = await msg.reply("🎨 <b>Generating new image...</b> (~10-30s)", parse_mode="HTML")
+    
+    try:
+        job_id = await api.generate_image(prompt, aspect_ratio="16:9")
+        
+        await status_msg.edit_text("⏳ <b>Processing...</b>", parse_mode="HTML")
+        image_url = await api.poll_for_image(job_id, timeout=300)
+        
+        await status_msg.edit_text("⬇️ <b>Downloading final image...</b>", parse_mode="HTML")
+        image_bytes = await api.download_media(image_url)
+        
+        image_file = BufferedInputFile(image_bytes, filename=f"{job_id}.png")
+        response_msg = await msg.answer_document(
+            document=image_file,
+            caption=add_caption_footer(
+                f"✨ <b>New Image Ready!</b>\n\n"
+                f"📝 <b>Prompt:</b> <code>{prompt}</code>\n"
+                f"🔖 <b>Job:</b> <code>{job_id[:8]}...</code>"
+            ),
+            parse_mode="HTML"
+        )
+        
+        await status_msg.delete()
+        
+        if LOG_GROUP_ID:
+            await bot.forward_message(LOG_GROUP_ID, msg.chat.id, response_msg.message_id)
+        
+    except Exception as e:
+        logger.exception(f"Failed for new image prompt: {prompt}")
+        await status_msg.edit_text(f"❌ <b>Error:</b>\n<code>{str(e)[:400]}</code>", parse_mode="HTML")
+        if LOG_GROUP_ID:
+            await bot.send_message(LOG_GROUP_ID, f"❌ Error for user {msg.from_user.id}:\n{str(e)[:400]}")
+    
+    await state.clear()
+
+@router.message(BananaStates.waiting_for_prompt)
+async def handle_invalid_prompt(msg: types.Message):
+    """Handle non-text input in prompt state"""
+    await msg.reply("❌ Please send a text prompt. Try again:")
+
+@router.message(VideoStates.waiting_for_video_prompt, F.text)
+async def handle_video_prompt(msg: types.Message, state: FSMContext, user: Dict):
+    """Handle video generation prompt"""
+    prompt = msg.text.strip()
+    if len(prompt) < 3:
+        await msg.reply("❌ Prompt too short. Minimum 3 characters required. Try again:")
+        return
+    
+    status_msg = await msg.reply("🎬 <b>Generating video...</b> (~30-90s)", parse_mode="HTML")
+    
+    try:
+        job_id = await api.generate_video(prompt)
+        
+        await status_msg.edit_text("⏳ <b>Processing video...</b>", parse_mode="HTML")
+        video_url = await api.poll_for_video(job_id, timeout=300)
+        
+        await status_msg.edit_text("⬇️ <b>Downloading final video...</b>", parse_mode="HTML")
+        video_bytes = await api.download_media(video_url)
+        
+        video_file = BufferedInputFile(video_bytes, filename=f"{job_id}.mp4")
+        response_msg = await msg.answer_video(
+            video=video_file,
+            caption=add_caption_footer(
+                f"✨ <b>Video Ready!</b>\n\n"
+                f"📝 <b>Prompt:</b> <code>{prompt}</code>\n"
+                f"🔖 <b>Job:</b> <code>{job_id[:8]}...</code>"
+            ),
+            parse_mode="HTML",
+            width=1280,
+            height=720,
+            duration=8,
+            supports_streaming=True
+        )
+        
+        await status_msg.delete()
+        
+        if LOG_GROUP_ID:
+            await bot.forward_message(LOG_GROUP_ID, msg.chat.id, response_msg.message_id)
+        
+    except Exception as e:
+        logger.exception(f"Failed for video prompt: {prompt}")
+        await status_msg.edit_text(f"❌ <b>Error:</b>\n<code>{str(e)[:400]}</code>", parse_mode="HTML")
+        if LOG_GROUP_ID:
+            await bot.send_message(LOG_GROUP_ID, f"❌ Error for user {msg.from_user.id}:\n{str(e)[:400]}")
+    
+    await state.clear()
 
 # Initialize API client
 api = GeminiGenAPI(parse_netscape_cookies(COOKIE_FILE_CONTENT), BEARER_TOKEN)
 
 async def on_startup():
     """Startup tasks"""
-    validate_config()
     logger.info("=" * 60)
     logger.info("🤖 Nano Banana Bot Starting...")
     logger.info(f"Owner ID: {OWNER_ID}")
@@ -803,27 +1361,32 @@ async def on_shutdown():
     logger.info("✅ Bot shutdown complete")
 
 async def main():
-    """Main bot runner"""
-    await on_startup()
-    
-    # Set up signal handlers for graceful shutdown
-    def signal_handler(signum, frame):
-        logger.info(f"Received signal {signum}")
-        sys.exit(0)
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    """Main bot runner - FIXED for Railway"""
+    logger.info("🚀 Starting bot initialization...")
     
     try:
+        await on_startup()
+        logger.info("✅ Startup complete. Starting polling...")
+        
+        # Health check for Railway
+        async def health_check():
+            while True:
+                await asyncio.sleep(30)
+                logger.info("💓 Bot is alive and running...")
+        
+        asyncio.create_task(health_check())
+        
         await dp.start_polling(bot, skip_updates=True)
+        
+    except Exception as e:
+        logger.exception(f"❌ Fatal error in main: {e}")
+        raise
     finally:
         await on_shutdown()
 
 if __name__ == "__main__":
     try:
+        logger.info("🎯 Starting bot process...")
         asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("🛑 Bot stopped by user")
     except Exception as e:
-        logger.exception(f"❌ Fatal error: {e}")
-        sys.exit(1)
+        logger.exception(f"💥 Fatal error: {e}")
