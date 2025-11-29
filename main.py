@@ -28,13 +28,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== CONFIGURATION ==========
-API_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-BEARER_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjQ0ODgyOTQsInN1YiI6IjVjZWFjZDQ0LWNjZjYtMTFmMC1iYzllLTQyMDI0MTE2YWU5ZSJ9.xNWFnk_whorYiM1MgDleFWS6PunWAkFybbg3NgrtEXc"
-MONGODB_URI = "mongodb+srv://nano:OUrfjxBKlErZyK3V@cluster0.2ndgfnl.mongodb.net/?appName=Cluster0"
-OWNER_ID = 123456789
-FORCE_JOIN_CHANNEL = "@yourchannel"
-LOG_GROUP_ID = -1001234567890  # Set to None to disable logging
+import os  # Add this at the top with other imports
+
+# ========== CONFIGURATION (ENVIRONMENT VARIABLES) ==========
+API_TOKEN = os.getenv("API_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+BEARER_TOKEN = os.getenv("BEARER_TOKEN", "YOUR_BEARER_TOKEN")
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017/")  # Fallback for local
+OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
+FORCE_JOIN_CHANNEL = os.getenv("FORCE_JOIN_CHANNEL", "@yourchannel")
+LOG_GROUP_ID = int(os.getenv("LOG_GROUP_ID", "-1001234567890")) if os.getenv("LOG_GROUP_ID") else None
+# ===========================================================
+
+# Rest of your code...
 
 COOKIE_FILE_CONTENT = """# Netscape HTTP Cookie File
 geminigen.ai	FALSE	/	FALSE	1779779317	ext_name	ojplmecpdpgccookcobabopnaifgidhf
