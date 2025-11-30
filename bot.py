@@ -440,12 +440,12 @@ class GeminiGenAPI:
     def __init__(self, cookies: dict, bearer_token: str):
         self.cookies = cookies
         self.bearer_token = bearer_token
-        self.base_url = "https://api.geminigen.ai  "
+        self.base_url = "https://geminigen.ai"  # ← REMOVE SPACES, REMOVE "api."
         self.headers = {
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
             "Accept": "application/json, text/plain, */*",
-            "Origin": "https://geminigen.ai  ",
-            "Referer": "https://geminigen.ai/  ",
+            "Origin": "https://geminigen.ai",  # ← REMOVE SPACES
+            "Referer": "https://geminigen.ai/",  # ← REMOVE SPACES
             "Authorization": f"Bearer {self.bearer_token}",
         }
     
