@@ -1,7 +1,3 @@
-see this error
-Cannot connect to host api.geminigen.ai :443 ssl:default [Name or service not known]
-
-
 
 from code 
 import asyncio
