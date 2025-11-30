@@ -440,18 +440,24 @@ class GeminiGenAPI:
     def __init__(self, cookies: dict, bearer_token: str):
         self.cookies = cookies
         self.bearer_token = bearer_token
-        self.base_url = "https://api.geminigen.ai "
+        # FIX 1: Remove trailing spaces
+        # FIX 2: Use geminigen.ai instead of api.geminigen.ai
+        self.base_url = "https://geminigen.ai"  # ← CHANGED
         self.headers = {
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
             "Accept": "application/json, text/plain, */*",
-            "Origin": "https://geminigen.ai ",
-            "Referer": "https://geminigen.ai/ ",
+            "Origin": "https://geminigen.ai",  # ← CHANGED
+            "Referer": "https://geminigen.ai/",  # ← CHANGED
             "Authorization": f"Bearer {self.bearer_token}",
         }
     
     async def generate_image(self, prompt: str, image_bytes: bytes = None, aspect_ratio: str = "16:9") -> str:
-        async with aiohttp.ClientSession(cookies=self.cookies, headers=self.headers) as session:
-            endpoint = f"{self.base_url}/api/generate_image"
+    async with aiohttp.ClientSession(cookies=self.cookies, headers=self.headers) as session:
+        endpoint = f"{self.base_url}/api/generate_image"
+        logger.info(f"🔍 Making request to: {endpoint}")  # ← ADD THIS
+        
+        form = aiohttp.FormData()
+        # ... rest of your code
             
             form = aiohttp.FormData()
             form.add_field('prompt', prompt)
@@ -1353,12 +1359,34 @@ async def on_startup():
     logger.info(f"Total Users: {db.users.count_documents({})}")
     logger.info("=" * 60)
 
-async def on_shutdown():
-    """Shutdown tasks"""
-    logger.info("🛑 Shutting down bot...")
-    await bot.session.close()
-    db.client.close()
-    logger.info("✅ Bot shutdown complete")
+async def on_startup():
+    """Startup tasks"""
+    logger.info("=" * 60)
+    logger.info("🤖 Nano Banana Bot Starting...")
+    
+    # DNS TEST
+    import socket
+    try:
+        ip = socket.gethostbyname("geminigen.ai")
+        logger.info(f"✅ DNS: geminigen.ai resolves to {ip}")
+    except socket.gaierror as e:
+        logger.error(f"❌ DNS Error: geminigen.ai - {e}")
+    
+    try:
+        ip = socket.gethostbyname("api.geminigen.ai")
+        logger.info(f"✅ DNS: api.geminigen.ai resolves to {ip}")
+    except socket.gaierror as e:
+        logger.error(f"❌ DNS Error: api.geminigen.ai - {e}")
+    
+    # API ENDPOINT TEST
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://geminigen.ai", timeout=10) as resp:
+                logger.info(f"✅ HTTP: geminigen.ai reachable (status: {resp.status})")
+    except Exception as e:
+        logger.error(f"❌ HTTP Error: Cannot reach geminigen.ai - {e}")
+    
+    # ... rest of your code
 
 async def main():
     """Main bot runner - FIXED for Railway"""
