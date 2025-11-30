@@ -1,8 +1,25 @@
-# CORRECT - specify Python version and network access
 [build]
 builder = "nixpacks"
 buildCommand = "pip install -r requirements.txt"
 
+# Critical: Specify Python version and network packages
+[nixpacks]
+# Use Python 3.11 (stable with aiohttp)
+pkgs = ["python311", "python311Packages.pip"]
+# Install system certificates and DNS tools
+aptPkgs = ["ca-certificates", "dnsutils", "curl"]
+
+# Service configuration
 [[services]]
 name = "bot"
-port = 8080  # Railway needs a port exposed
+# Railway requires a port for health checks (even if not used)
+port = 8080
+
+[deploy]
+# Command to start your bot
+startCommand = "python bot.py"
+# Health check endpoint (we'll add this to bot.py)
+healthcheckPath = "/health"
+# Restart on failure
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
