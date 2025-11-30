@@ -19,6 +19,8 @@ from pymongo import MongoClient
 from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
 from datetime import datetime, timezone
+from seleniumbase import SB
+from concurrent.futures import ThreadPoolExecutor
 
 # ========== LOGGING CONFIGURATION (TOP) ==========
 logging.basicConfig(
@@ -450,6 +452,7 @@ class GeminiGenAPI:
         }
     
     async def generate_image(self, prompt: str, image_bytes: bytes = None, aspect_ratio: str = "16:9") -> str:
+        """Image generation (no Turnstile required)"""
         async with aiohttp.ClientSession(cookies=self.cookies, headers=self.headers) as session:
             endpoint = f"{self.base_url}/api/generate_image"
             
@@ -476,9 +479,77 @@ class GeminiGenAPI:
                 
                 return job_id
     
+    def _get_turnstile_token_sync(self) -> Optional[str]:
+        """Synchronous browser automation - runs in thread pool"""
+        try:
+            # Use undetectable Chrome in headless mode
+            with SB(uc=True, headless=True, disable_gpu=True, no_sandbox=True) as sb:
+                sb.open("https://geminigen.ai/video")
+                sb.wait_for_ready_state_complete()
+                sb.sleep(5)  # Wait for Turnstile to load
+                
+                # Execute JavaScript to extract the token
+                token = sb.execute_script("""
+                    // Look for Turnstile token in hidden input
+                    const tokenInput = document.querySelector('input[name="turnstile_token"]');
+                    if (tokenInput && tokenInput.value) {
+                        return tokenInput.value;
+                    }
+                    
+                    // Try to find it in any form
+                    const forms = document.querySelectorAll('form');
+                    for (let form of forms) {
+                        const hiddenInput = form.querySelector('input[name="turnstile_token"]');
+                        if (hiddenInput && hiddenInput.value) {
+                            return hiddenInput.value;
+                        }
+                    }
+                    
+                    // Check for Cloudflare Turnstile response
+                    const turnstileElements = document.querySelectorAll('[name="cf-turnstile-response"]');
+                    for (let el of turnstileElements) {
+                        if (el.value) return el.value;
+                    }
+                    
+                    return null;
+                """)
+                
+                if token:
+                    return token
+                
+                # If not found immediately, wait a bit more and retry
+                sb.sleep(5)
+                token = sb.execute_script("""
+                    const tokenInput = document.querySelector('input[name="turnstile_token"]');
+                    return tokenInput ? tokenInput.value : null;
+                """)
+                
+                return token
+                
+        except Exception as e:
+            logger.error(f"Browser automation failed: {e}")
+            return None
+    
+    async def solve_turnstile_free(self) -> str:
+        """FREE Turnstile solver using browser automation"""
+        logger.info("🔄 Launching browser to solve Turnstile (15-30s)...")
+        
+        loop = asyncio.get_event_loop()
+        token = await loop.run_in_executor(executor, self._get_turnstile_token_sync)
+        
+        if not token:
+            raise Exception("❌ Failed to get Turnstile token via browser automation")
+        
+        logger.info("✅ Turnstile token obtained!")
+        return token
+    
     async def generate_video(self, prompt: str) -> str:
+        """Video generation with FREE Turnstile bypass"""
         async with aiohttp.ClientSession(cookies=self.cookies, headers=self.headers) as session:
             endpoint = f"{self.base_url}/api/video-gen/veo"
+            
+            # Get Turnstile token via browser
+            turnstile_token = await self.solve_turnstile_free()
             
             form = aiohttp.FormData()
             form.add_field('prompt', prompt)
@@ -487,6 +558,7 @@ class GeminiGenAPI:
             form.add_field('resolution', '720p')
             form.add_field('aspect_ratio', '16:9')
             form.add_field('enhance_prompt', 'true')
+            form.add_field('turnstile_token', turnstile_token)
             
             async with session.post(endpoint, data=form) as resp:
                 if resp.status not in (200, 202):
@@ -503,6 +575,7 @@ class GeminiGenAPI:
                 return job_id
     
     async def poll_for_image(self, job_id: str, timeout: int = 300) -> str:
+        """Poll for image completion"""
         async with aiohttp.ClientSession(cookies=self.cookies, headers=self.headers) as session:
             start = datetime.now()
             endpoint = f"{self.base_url}/api/history/{job_id}"
@@ -558,7 +631,6 @@ class GeminiGenAPI:
                         
                         status = result.get("status", "")
                         progress = result.get("status_percentage", 0)
-                        queue = result.get("queue_position", 0)
                         error_message = result.get("error_message", "")
                         
                         if status in [0, "failed", "error"]:
@@ -578,6 +650,7 @@ class GeminiGenAPI:
                     await asyncio.sleep(min(10 * (retry_count + 1), 30))
     
     async def poll_for_video(self, job_id: str, timeout: int = 300) -> str:
+        """Poll for video completion"""
         async with aiohttp.ClientSession(cookies=self.cookies, headers=self.headers) as session:
             start = datetime.now()
             endpoint = f"{self.base_url}/api/history/{job_id}"
@@ -633,7 +706,6 @@ class GeminiGenAPI:
                         
                         status = result.get("status", "")
                         progress = result.get("status_percentage", 0)
-                        queue = result.get("queue_position", 0)
                         error_message = result.get("error_message", "")
                         
                         if status in [0, "failed", "error"]:
@@ -653,7 +725,7 @@ class GeminiGenAPI:
                     await asyncio.sleep(min(10 * (retry_count + 1), 30))
     
     async def download_media(self, url: str, max_size: int = 50 * 1024 * 1024) -> bytes:
-        """Download media with size limit (default 50MB)"""
+        """Download media with size limit"""
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=300)) as resp:
@@ -1358,6 +1430,7 @@ async def on_shutdown():
     logger.info("🛑 Shutting down bot...")
     await bot.session.close()
     db.client.close()
+    executor.shutdown(wait=True)  # Cleanup browser threads
     logger.info("✅ Bot shutdown complete")
 
 async def main():
@@ -1383,6 +1456,19 @@ async def main():
         raise
     finally:
         await on_shutdown()
+
+
+# ========== EXECUTOR & API INITIALIZATION ==========
+# Thread pool for browser automation (2 concurrent browsers max for Railway)
+executor = ThreadPoolExecutor(max_workers=2)
+
+# Initialize API client
+api = GeminiGenAPI(
+    cookies=parse_netscape_cookies(COOKIE_FILE_CONTENT), 
+    bearer_token=BEARER_TOKEN
+)
+# ==================================================
+
 
 if __name__ == "__main__":
     try:
